@@ -11,3 +11,4 @@
 {"name":"enterprise over pace","hold_ms":4000,"s":88.0,"sr":-1,"acct":"ent","tp":52,"pd":30,"rd":"Aug 15","st":"allowed","ok":true}
 {"name":"model split - four ways","hold_ms":4000,"s":61.0,"sr":140,"w":44.0,"wr":7000,"ms":[["f5",38],["o5",27],["s46",21],["?",14]],"st":"allowed","ok":true}
 {"name":"desktop app eating the window","hold_ms":4000,"s":72.0,"sr":95,"w":51.0,"wr":6800,"ms":[["o5",41],["~",38],["h45",21]],"st":"allowed","ok":true}
+{"name":"real world - desktop app dominates","hold_ms":60000,"s":55.0,"sr":171,"w":38.0,"wr":4241,"ms":[["f5",7],["o5",6],["~",87]],"st":"allowed","ok":true}

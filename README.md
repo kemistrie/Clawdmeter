@@ -17,7 +17,7 @@ The device boots into the splash. Tap the screen anywhere to switch to the Usage
 |              Splash               |              Usage              |
 | :-------------------------------: | :-----------------------------: |
 | ![Splash](screenshots/splash.gif) | ![Usage](screenshots/usage.png) |
-|   Splash; touch-toggle anytime    | Session and weekly utilization  |
+|   Splash; touch-toggle anytime    | Session and weekly utilization, with the session bar broken down by model |
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
@@ -201,9 +201,11 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 <img src="assets/readme/magnifier.gif" width="120" align="right" alt="">
 
 Turn on `model_split` in the config and the **Current** bar splits into one
-segment per model — Fable plum, Opus terra-cotta (shaded by generation, so
-Opus 5 and Opus 4.7 stay apart), Sonnet green, Haiku slate — with the share
-named beside the reset time, rotating through the models every 2.5 s.
+segment per model — Fable terra-cotta, Opus plum (shaded by generation, so
+Opus 5 and Opus 4.7 stay apart), Sonnet green, Haiku slate, and a muted amber
+**Elsewhere** for what Claude Code can't see — with the share named beside the
+reset time, rotating through them every 2.5 s. The big percentage takes over
+the utilization warning color, since the bar is now carrying the breakdown.
 
 ```
 model_split = on     # ~/.config/claude-usage-monitor/config
@@ -216,18 +218,21 @@ whether you call Haiku, Opus or Fable. So the split can't come from the API.
 It's reconstructed on the host from Claude Code's own transcripts under
 `<config dir>/projects/**.jsonl` — every assistant turn there records its
 model and token usage — summed over the turns inside the current 5h window
-and weighted by list price. That makes it a good proxy for quota share, not
-an official number: Anthropic doesn't publish the weighting behind unified
-utilization.
+and weighted by list price — except cache reads, which the unified quota
+appears not to count at all (measured: pricing them in as billed made long
+cache-heavy agent turns look far more expensive than the window treated them).
+That makes it a good proxy for quota share, not an official number: Anthropic
+doesn't publish the weighting behind unified utilization.
 
 **What Claude Code can't see.** The desktop app, claude.ai in a browser, and
 the same plan on a second machine all draw on the *same* quota and leave no
 local transcript — a split built from transcripts alone would report
 "Opus 5 100%" while Fable in the desktop app ate half the window next to it.
 That gap is measured rather than ignored: utilization and local cost would be
-proportional if Claude Code were the only consumer, so the smallest ratio
-observed between any two samples estimates the true rate, and whatever it
-fails to explain becomes a muted **Elsewhere** segment. It errs toward silence — if
+proportional if Claude Code were the only consumer, so the smallest ratio seen
+— across the running totals and across pairs of samples, which cancel out
+whatever happened before the daemon started watching — estimates the true
+rate, and whatever it fails to explain becomes a muted **Elsewhere** segment. It errs toward silence — if
 something else was running during every sample, the remainder is
 under-reported, never invented.
 

@@ -9,6 +9,7 @@
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
+LV_FONT_DECLARE(font_tiempos_44);
 LV_FONT_DECLARE(font_tiempos_34);
 LV_FONT_DECLARE(font_styrene_48);
 LV_FONT_DECLARE(font_styrene_28);
@@ -45,6 +46,7 @@ struct Layout {
     const lv_font_t* pill_font;      // "Current" / "Weekly" pill
     const lv_font_t* reset_font;     // "Resets in ..." line
     const lv_font_t* pace_font;      // enterprise "Under/On/Over pace" line
+    const lv_font_t* model_font;     // rotating model legend beside the reset line
     const lv_font_t* anim_font;      // animated status line
     int16_t anim_y;                  // status line offset from bottom
     bool    small_icons;             // 40px logo + 24px battery (vs 80/48) on small screens
@@ -76,7 +78,6 @@ static void compute_layout(const BoardCaps& c) {
     L.scr_w = c.width;
     L.scr_h = c.height;
     L.margin = 20;
-    L.title_y = 30;
 
     // Values shared by the two original breakpoints; the small branch below
     // overrides them wholesale.
@@ -85,18 +86,30 @@ static void compute_layout(const BoardCaps& c) {
     L.panel_pad_y = 12;
     L.pill_pad_x = 18;
     L.pill_pad_y = 6;
-    L.title_font   = &font_tiempos_56;
+    L.title_font   = &font_tiempos_44;
     L.pct_font     = &font_styrene_48;
     L.ent_pct_font = &font_tiempos_56;
     L.pill_font    = &font_styrene_28;
     L.reset_font   = &font_styrene_28;
     L.pace_font    = &font_styrene_16;
+    // One step above the pace line: the legend is the readout the split
+    // exists for, and at 16 px beside a 28 px reset time it read as a
+    // footnote. render_model_legend() shortens the text when the wider
+    // font no longer clears that reset line.
+    L.model_font   = &font_styrene_20;
     L.anim_font    = &font_mono_32;
     L.anim_y = -15;
     L.small_icons = false;
     L.title_nudge = 16;
-    L.logo_y = L.title_y - 10;
-    L.batt_y = L.title_y;
+    // Header: the mascot art, the title text and the battery glyph each carry
+    // a different amount of internal padding, so sharing a nominal top edge
+    // left their *optical* centers 8.5 px apart. These three are tuned
+    // independently to put all three centers on one line (measured on the
+    // rendered output at 480x480 — re-measure if the title font or the
+    // battery icons change).
+    L.title_y = 34;
+    L.logo_y  = 20;
+    L.batt_y  = 36;
     L.batt_w = ICON_BATTERY_W;
     L.pair_y1 = 40;
     L.pair_y2 = 120;
@@ -105,11 +118,16 @@ static void compute_layout(const BoardCaps& c) {
 
     if (c.height >= 460) {
         // Large layout — tuned for 480x480 (AMOLED-2.16).
-        L.content_y = 100;
-        L.usage_panel_h = 150;
+        // The status line used to occupy the bottom strip; with it gone on
+        // this view the two panels take the space instead — taller cards,
+        // thicker bars, more air around the reset line. The 20px bottom
+        // clearance is kept so nothing reaches the rounded corners.
+        L.content_y = 96;
+        L.usage_panel_h = 172;
         L.usage_panel_gap = 16;
-        L.usage_bar_y = 56;
-        L.usage_reset_y = 94;
+        L.bar_h = 32;
+        L.usage_bar_y = 64;
+        L.usage_reset_y = 110;
         L.bt_info_panel_h = 160;
         L.bt_reset_zone_h = 110;
         L.bt_title_font    = &font_tiempos_56;
@@ -120,10 +138,11 @@ static void compute_layout(const BoardCaps& c) {
     } else if (c.height >= 300) {
         // Compact layout — tuned for 368x448 (AMOLED-1.8).
         L.content_y = 85;
-        L.usage_panel_h = 130;
-        L.usage_panel_gap = 12;
-        L.usage_bar_y = 48;
-        L.usage_reset_y = 78;
+        L.usage_panel_h = 160;
+        L.usage_panel_gap = 14;
+        L.bar_h = 28;
+        L.usage_bar_y = 58;
+        L.usage_reset_y = 100;
         L.bt_info_panel_h = 140;
         L.bt_reset_zone_h = 90;
         L.bt_title_font    = &font_tiempos_34;
@@ -136,13 +155,13 @@ static void compute_layout(const BoardCaps& c) {
         // Everything shrinks: fonts two steps down, panels ~half height, and
         // the corner logo/battery switch to the 40px/24px small assets.
         L.margin = 8;
-        L.title_y = 4;
+        L.title_y = 3;
         L.content_y = 44;
-        L.usage_panel_h = 74;
-        L.usage_panel_gap = 6;
-        L.usage_bar_y = 30;
-        L.usage_reset_y = 46;
-        L.bar_h = 12;
+        L.usage_panel_h = 88;
+        L.usage_panel_gap = 8;
+        L.usage_bar_y = 36;
+        L.usage_reset_y = 58;
+        L.bar_h = 16;
         L.panel_pad_x = 10;
         L.panel_pad_y = 6;
         L.pill_pad_x = 8;
@@ -153,14 +172,17 @@ static void compute_layout(const BoardCaps& c) {
         L.pill_font    = &font_styrene_14;
         L.reset_font   = &font_styrene_14;
         L.pace_font    = &font_styrene_12;
+        L.model_font   = &font_styrene_14;
         L.anim_font    = &font_mono_18;
         // Center the status line in the strip below the weekly panel; flush
         // against the bottom edge it reads as unevenly spaced.
         L.anim_y = -10;
         L.small_icons = true;
         L.title_nudge = 8;
+        // Same optical-center rule as the large header above, re-measured for
+        // the 34 px title and the small battery glyph.
         L.logo_y = 2;
-        L.batt_y = 10;
+        L.batt_y = 11;
         L.batt_w = ICON_BATTERY_SMALL_W;
         L.pair_y1 = 12;
         L.pair_y2 = 56;
@@ -549,11 +571,11 @@ static void build_model_split(lv_obj_t* panel) {
     lbl_model_legend = lv_label_create(panel);
     lv_label_set_recolor(lbl_model_legend, true);
     lv_label_set_text(lbl_model_legend, "");
-    lv_obj_set_style_text_font(lbl_model_legend, L.pace_font, 0);
+    lv_obj_set_style_text_font(lbl_model_legend, L.model_font, 0);
     // Sit on the reset line's baseline: that line uses a bigger font, so drop
     // the legend by the difference instead of aligning both tops.
     const int dy = lv_font_get_line_height(L.reset_font)
-                 - lv_font_get_line_height(L.pace_font);
+                 - lv_font_get_line_height(L.model_font);
     lv_obj_align(lbl_model_legend, LV_ALIGN_TOP_RIGHT, 0, L.usage_reset_y + dy);
 
     lv_obj_add_flag(seg_clip, LV_OBJ_FLAG_HIDDEN);
@@ -904,6 +926,15 @@ static void update_view_state(void) {
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(v == 0 ? pair_group : v == 1 ? idle_group : usage_group,
                       LV_OBJ_FLAG_HIDDEN);
+
+    // The status line only ever says something real on the other two views —
+    // "Waiting" while unpaired, "Listening"/"No data" while stale. Over live
+    // panels it's whimsy from Claude Code's thinking-word list, and the
+    // panels already carry the screen, so it just crowds the bottom edge.
+    if (lbl_anim) {
+        if (v == 2) lv_obj_add_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+        else        lv_obj_clear_flag(lbl_anim, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_tick_anim(void) {
