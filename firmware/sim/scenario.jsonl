@@ -2,10 +2,12 @@
 # Extra keys: "name" (window title), "hold_ms" (time on this state, default 3000).
 # Keys: space play/pause · arrows step · 1-9 jump · see boards/sim/board.h.
 {"name":"fresh session","hold_ms":3000,"s":3.0,"sr":295,"w":12.0,"wr":9000,"st":"allowed","ok":true,"t":1785474000,"tf":24}
-{"name":"steady use","hold_ms":3000,"s":42.0,"sr":180,"w":33.0,"wr":7900,"st":"allowed","ok":true}
-{"name":"warning zone","hold_ms":3000,"s":78.0,"sr":75,"w":55.0,"wr":6400,"st":"allowed","ok":true}
-{"name":"maxed out","hold_ms":4000,"s":98.0,"sr":12,"w":88.0,"wr":5200,"st":"limited","ok":true}
+{"name":"steady use","hold_ms":3000,"s":42.0,"sr":180,"w":33.0,"wr":7900,"ms":[["o5",64],["s5",28],["h45",8]],"st":"allowed","ok":true}
+{"name":"warning zone","hold_ms":3000,"s":78.0,"sr":75,"w":55.0,"wr":6400,"ms":[["f5",52],["o5",31],["o47",17]],"st":"allowed","ok":true}
+{"name":"maxed out","hold_ms":4000,"s":98.0,"sr":12,"w":88.0,"wr":5200,"ms":[["o5",100]],"st":"limited","ok":true}
 {"name":"session reset + chime","hold_ms":4000,"s":2.0,"sr":298,"w":88.0,"wr":5100,"st":"allowed","c":true,"ok":true}
 {"name":"weekly nearly gone","hold_ms":3000,"s":25.0,"sr":250,"w":96.0,"wr":300,"st":"allowed","ok":true}
 {"name":"enterprise on pace","hold_ms":3000,"s":37.0,"sr":-1,"acct":"ent","tp":40,"pd":30,"rd":"Aug 15","st":"allowed","ok":true}
 {"name":"enterprise over pace","hold_ms":4000,"s":88.0,"sr":-1,"acct":"ent","tp":52,"pd":30,"rd":"Aug 15","st":"allowed","ok":true}
+{"name":"model split - four ways","hold_ms":4000,"s":61.0,"sr":140,"w":44.0,"wr":7000,"ms":[["f5",38],["o5",27],["s46",21],["?",14]],"st":"allowed","ok":true}
+{"name":"desktop app eating the window","hold_ms":4000,"s":72.0,"sr":95,"w":51.0,"wr":6800,"ms":[["o5",41],["~",38],["h45",21]],"st":"allowed","ok":true}

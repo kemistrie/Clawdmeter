@@ -44,6 +44,8 @@ daemon payload plus two optional keys:
 
 - `"name"` — shown in the window title
 - `"hold_ms"` — time on this state (default 3000)
+- `"ms"` — per-model split of the 5h window, e.g. `[["o5",64],["s5",28]]`;
+  splits the Current bar into colored segments (codes: `daemon/model_split.py`)
 
 Lines starting with `#` are comments. Lines containing an `"ss"` array are
 **session payloads** (issue #135 wire format) and go out on the session

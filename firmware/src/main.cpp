@@ -119,6 +119,23 @@ static bool parse_json(const char* json, UsageData* out) {
     strlcpy(out->reset_date, doc["rd"] | "", sizeof(out->reset_date));
     out->clock_epoch = doc["t"] | 0L;
     out->clock_fmt = doc["tf"] | 24;
+
+    // "ms": [["o5",78],["s5",22]] — per-model share of the 5h window, heaviest
+    // first. Absent on older daemons and when the user hasn't opted in, which
+    // leaves model_count at 0 and the usage screen on its plain bar.
+    out->model_count = 0;
+    for (JsonVariantConst entry : doc["ms"].as<JsonArrayConst>()) {
+        if (out->model_count >= MODEL_SLICES_MAX) break;
+        JsonArrayConst pair = entry.as<JsonArrayConst>();
+        if (pair.size() < 2) continue;
+        const char* code = pair[0] | "";
+        int pct = pair[1] | 0;
+        if (code[0] == '\0' || pct <= 0) continue;
+        ModelSlice& slice = out->models[out->model_count++];
+        strlcpy(slice.code, code, sizeof(slice.code));
+        slice.pct = (uint8_t)(pct > 100 ? 100 : pct);
+    }
+
     out->ok = doc["ok"] | false;
     out->valid = true;
     return true;

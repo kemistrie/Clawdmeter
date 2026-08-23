@@ -202,6 +202,13 @@ static int      clock_last_min = -1;   // last rendered minute; avoids redrawing
 static lv_obj_t* usage_group;   // the two usage panels — shown when connected
 static lv_obj_t* pair_group;    // pairing hint — shown when disconnected
 static lv_obj_t* bar_session;
+// Per-model breakdown drawn over the session bar's filled portion: a
+// clipping frame (so the ends stay rounded like the bar's own indicator)
+// holding one flat rectangle per model. Hidden whenever the daemon sends no
+// split, which leaves bar_session's plain indicator visible instead.
+static lv_obj_t* seg_clip;
+static lv_obj_t* seg_rects[MODEL_SLICES_MAX];
+static lv_obj_t* lbl_model_legend;
 static lv_obj_t* lbl_session_pct;
 static lv_obj_t* lbl_session_label;
 static lv_obj_t* lbl_session_reset;
@@ -331,6 +338,51 @@ static lv_obj_t* make_panel(lv_obj_t* parent, int x, int y, int w, int h) {
     return panel;
 }
 
+// Wire code -> display name + segment color. The daemon collapses dated
+// snapshots and context variants onto these codes (see daemon/model_split.py),
+// so "claude-opus-5[1m]" and "claude-opus-5" both arrive as "o5". An
+// unrecognized code falls through to the neutral "Other" style rather than
+// being dropped — a model newer than this firmware still shows up on the bar.
+struct ModelStyle {
+    const char* code;
+    const char* label;   // spelled out where the panel has room
+    const char* brief;   // fallback for panels that don't
+    uint32_t    color;
+};
+
+static const ModelStyle MODEL_STYLES[] = {
+    { "f5",  "Fable 5",    "F5",   THEME_M_FABLE      },
+    { "m5",  "Mythos 5",   "M5",   THEME_M_MYTHOS     },
+    { "o5",  "Opus 5",     "O5",   THEME_M_OPUS_5     },
+    { "o48", "Opus 4.8",   "O4.8", THEME_M_OPUS_48    },
+    { "o47", "Opus 4.7",   "O4.7", THEME_M_OPUS_47    },
+    { "o46", "Opus 4.6",   "O4.6", THEME_M_OPUS_46    },
+    { "o45", "Opus 4.5",   "O4.5", THEME_M_OPUS_OLD   },
+    { "op",  "Opus",       "Opus", THEME_M_OPUS_OLD   },
+    { "s5",  "Sonnet 5",   "S5",   THEME_M_SONNET_5   },
+    { "s46", "Sonnet 4.6", "S4.6", THEME_M_SONNET_46  },
+    { "s45", "Sonnet 4.5", "S4.5", THEME_M_SONNET_OLD },
+    { "so",  "Sonnet",     "Son",  THEME_M_SONNET_OLD },
+    { "h45", "Haiku 4.5",  "H4.5", THEME_M_HAIKU      },
+    { "ha",  "Haiku",      "Haiku",THEME_M_HAIKU      },
+};
+
+static const ModelStyle MODEL_STYLE_OTHER = { "?", "Other", "Other", THEME_M_OTHER };
+
+// "~" is the daemon's marker for window it measured but cannot attribute to
+// any Claude Code turn — the desktop app, claude.ai, or the same plan on
+// another machine. See daemon/unattributed.py.
+static const ModelStyle MODEL_STYLE_ELSEWHERE = { "~", "Elsewhere", "Else",
+                                                  THEME_M_ELSEWHERE };
+
+static const ModelStyle& model_style(const char* code) {
+    if (strcmp(code, MODEL_STYLE_ELSEWHERE.code) == 0) return MODEL_STYLE_ELSEWHERE;
+    for (const ModelStyle& m : MODEL_STYLES) {
+        if (strcmp(m.code, code) == 0) return m;
+    }
+    return MODEL_STYLE_OTHER;
+}
+
 static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     lv_obj_t* bar = lv_bar_create(parent);
     lv_obj_set_pos(bar, x, y);
@@ -412,6 +464,155 @@ static lv_obj_t* make_usage_panel(lv_obj_t* parent, int y, const char* pill_text
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 
     return panel;
+}
+
+// The legend has only the sliver of the reset line the time doesn't use, so
+// it names one model at a time and rotates through them — every model gets
+// named without the panel needing a row it hasn't got.
+#define MODEL_LEGEND_MS 2500
+static ModelSlice legend_slices[MODEL_SLICES_MAX];
+static uint8_t    legend_count = 0;
+static uint8_t    legend_idx = 0;
+static uint32_t   legend_start = 0;
+
+// Write the current model into the legend, in the longest form that still
+// clears the "Resets in ..." line. Labels auto-size to their text, so the fit
+// is measured on the real rendered width rather than guessed from a font
+// metric — which keeps this correct on every panel size and reset string.
+static void render_model_legend(void) {
+    if (!lbl_model_legend || legend_count == 0) return;
+    const ModelSlice& slice = legend_slices[legend_idx];
+    const ModelStyle& style = model_style(slice.code);
+
+    char forms[3][40];
+    snprintf(forms[0], sizeof(forms[0]), "#%06x %s %d%%#", (unsigned)style.color, style.label, slice.pct);
+    snprintf(forms[1], sizeof(forms[1]), "#%06x %s %d%%#", (unsigned)style.color, style.brief, slice.pct);
+    snprintf(forms[2], sizeof(forms[2]), "#%06x %s#",      (unsigned)style.color, style.brief);
+
+    const int gap = 12;
+    lv_obj_update_layout(lbl_session_reset);
+    const int avail = (L.content_w - 2 * L.panel_pad_x)
+                    - lv_obj_get_width(lbl_session_reset) - gap;
+
+    for (int i = 0; i < 3; i++) {
+        lv_label_set_text(lbl_model_legend, forms[i]);
+        lv_obj_update_layout(lbl_model_legend);
+        if (lv_obj_get_width(lbl_model_legend) <= avail) {
+            lv_obj_clear_flag(lbl_model_legend, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+    }
+    // Even the bare code collides with the time — the bar speaks for itself.
+    lv_obj_add_flag(lbl_model_legend, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Advance the rotating legend. Called from ui_tick_anim on the usage screen.
+static void tick_model_legend(uint32_t now) {
+    if (legend_count < 2 || !lbl_model_legend) return;
+    if (lv_obj_has_flag(seg_clip, LV_OBJ_FLAG_HIDDEN)) return;
+    if (now - legend_start < MODEL_LEGEND_MS) return;
+    legend_start = now;
+    legend_idx = (uint8_t)((legend_idx + 1) % legend_count);
+    render_model_legend();
+}
+
+// Build the model breakdown over the session bar: a rounded clipping frame
+// sized to the filled portion, plus one flat rectangle per model inside it,
+// and a legend naming the heaviest model(s) at the right of the reset line.
+// Everything starts hidden — update_model_split() decides per payload.
+static void build_model_split(lv_obj_t* panel) {
+    const int bar_w = L.content_w - 2 * L.panel_pad_x;
+
+    seg_clip = lv_obj_create(panel);
+    lv_obj_set_pos(seg_clip, 0, L.usage_bar_y);
+    lv_obj_set_size(seg_clip, bar_w, L.bar_h);
+    lv_obj_set_style_bg_opa(seg_clip, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(seg_clip, 0, 0);
+    lv_obj_set_style_pad_all(seg_clip, 0, 0);
+    lv_obj_set_style_radius(seg_clip, 6, 0);       // matches make_bar's indicator
+    lv_obj_set_style_clip_corner(seg_clip, true, 0);
+    lv_obj_clear_flag(seg_clip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(seg_clip, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    for (int i = 0; i < MODEL_SLICES_MAX; i++) {
+        lv_obj_t* seg = lv_obj_create(seg_clip);
+        lv_obj_set_size(seg, 0, L.bar_h);
+        lv_obj_set_style_bg_opa(seg, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(seg, 0, 0);
+        lv_obj_set_style_pad_all(seg, 0, 0);
+        lv_obj_set_style_radius(seg, 0, 0);        // seg_clip rounds the outer ends
+        lv_obj_clear_flag(seg, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(seg, LV_OBJ_FLAG_EVENT_BUBBLE);
+        seg_rects[i] = seg;
+    }
+
+    lbl_model_legend = lv_label_create(panel);
+    lv_label_set_recolor(lbl_model_legend, true);
+    lv_label_set_text(lbl_model_legend, "");
+    lv_obj_set_style_text_font(lbl_model_legend, L.pace_font, 0);
+    // Sit on the reset line's baseline: that line uses a bigger font, so drop
+    // the legend by the difference instead of aligning both tops.
+    const int dy = lv_font_get_line_height(L.reset_font)
+                 - lv_font_get_line_height(L.pace_font);
+    lv_obj_align(lbl_model_legend, LV_ALIGN_TOP_RIGHT, 0, L.usage_reset_y + dy);
+
+    lv_obj_add_flag(seg_clip, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(lbl_model_legend, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Lay the model segments over the session bar's filled portion and name the
+// heaviest model(s). With no split to show, everything hides and the bar's own
+// utilization-colored indicator takes back over.
+static void update_model_split(const UsageData* data) {
+    if (!seg_clip) return;
+
+    const int bar_w = L.content_w - 2 * L.panel_pad_x;
+    const int s_pct = (int)(data->session_pct + 0.5f);
+    const int filled_w = bar_w * (s_pct < 0 ? 0 : s_pct > 100 ? 100 : s_pct) / 100;
+
+    if (data->enterprise || data->model_count == 0 || filled_w <= 0) {
+        lv_obj_add_flag(seg_clip, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(lbl_model_legend, LV_OBJ_FLAG_HIDDEN);
+        legend_count = 0;
+        lv_obj_set_style_bg_opa(bar_session, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_text_color(lbl_session_pct, COL_TEXT, 0);
+        return;
+    }
+
+    // The segments now carry the color, so the utilization warning that used
+    // to live in the bar moves onto the big percentage.
+    lv_obj_set_style_bg_opa(bar_session, LV_OPA_TRANSP, LV_PART_INDICATOR);
+    lv_obj_set_style_text_color(lbl_session_pct, pct_color(data->session_pct), 0);
+
+    lv_obj_set_width(seg_clip, filled_w);
+    lv_obj_clear_flag(seg_clip, LV_OBJ_FLAG_HIDDEN);
+
+    int x = 0;
+    for (int i = 0; i < MODEL_SLICES_MAX; i++) {
+        lv_obj_t* seg = seg_rects[i];
+        if (i >= data->model_count) {
+            lv_obj_add_flag(seg, LV_OBJ_FLAG_HIDDEN);
+            continue;
+        }
+        // The last visible slice takes whatever pixels integer division left
+        // over, so the segments always span the filled width exactly.
+        const bool last = (i == data->model_count - 1);
+        int w = last ? filled_w - x : filled_w * data->models[i].pct / 100;
+        if (w < 0) w = 0;
+        lv_obj_set_pos(seg, x, 0);
+        lv_obj_set_size(seg, w, L.bar_h);
+        lv_obj_set_style_bg_color(seg, lv_color_hex(model_style(data->models[i].code).color), 0);
+        lv_obj_clear_flag(seg, LV_OBJ_FLAG_HIDDEN);
+        x += w;
+    }
+
+    // Restart the rotation on the heaviest model so a fresh payload always
+    // leads with the answer to "what is eating my session right now".
+    memcpy(legend_slices, data->models, sizeof(legend_slices));
+    legend_count = data->model_count;
+    legend_idx = 0;
+    legend_start = lv_tick_get();
+    render_model_legend();
 }
 
 // Pairing hint — shown when disconnected so the screen isn't empty and the
@@ -521,6 +722,8 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_style_text_font(lbl_spending_status, L.pace_font, 0);
     lv_obj_set_pos(lbl_spending_status, 0, L.usage_reset_y + 20);
     lv_obj_add_flag(lbl_spending_status, LV_OBJ_FLAG_HIDDEN);
+
+    build_model_split(panel_session);
 
     panel_weekly = make_usage_panel(usage_group,
                      L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
@@ -652,6 +855,7 @@ void ui_update(const UsageData* data) {
 
     lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
     lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
+    update_model_split(data);
 
     if (data->enterprise) {
         // Period box: time % + dynamic pace color + "Resets <date>" label
@@ -666,6 +870,10 @@ void ui_update(const UsageData* data) {
                  pace_hex, pace_text, data->reset_date);
         lv_label_set_text(lbl_weekly_reset, buf);
     } else {
+        // Restore the pill: the enterprise branch relabels it "Period", and
+        // a config_dirs setup mixing a Pro and an Enterprise plan alternates
+        // between the two on consecutive polls.
+        lv_label_set_text(lbl_weekly_label, "Weekly");
         int w_pct = (int)(data->weekly_pct + 0.5f);
         lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
         lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
@@ -725,6 +933,8 @@ void ui_tick_anim(void) {
             lv_label_set_text(lbl_title, tbuf);
         }
     }
+
+    tick_model_legend(now);
 
     if (now - anim_msg_start >= ANIM_MSG_MS) {
         anim_msg_idx = (anim_msg_idx + 1) % ANIM_MSG_COUNT;

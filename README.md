@@ -196,6 +196,47 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v Clawdmeter /f
 6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
 7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
 
+## Which model is eating your session
+
+<img src="assets/readme/magnifier.gif" width="120" align="right" alt="">
+
+Turn on `model_split` in the config and the **Current** bar splits into one
+segment per model — Fable plum, Opus terra-cotta (shaded by generation, so
+Opus 5 and Opus 4.7 stay apart), Sonnet green, Haiku slate — with the share
+named beside the reset time, rotating through the models every 2.5 s.
+
+```
+model_split = on     # ~/.config/claude-usage-monitor/config
+```
+
+**Where the numbers come from.** The Anthropic API has *no* per-model rate
+limit: `anthropic-ratelimit-unified-5h-*` and its 7d/overage siblings cover
+every model together, and the response headers are byte-for-byte the same
+whether you call Haiku, Opus or Fable. So the split can't come from the API.
+It's reconstructed on the host from Claude Code's own transcripts under
+`<config dir>/projects/**.jsonl` — every assistant turn there records its
+model and token usage — summed over the turns inside the current 5h window
+and weighted by list price. That makes it a good proxy for quota share, not
+an official number: Anthropic doesn't publish the weighting behind unified
+utilization.
+
+**What Claude Code can't see.** The desktop app, claude.ai in a browser, and
+the same plan on a second machine all draw on the *same* quota and leave no
+local transcript — a split built from transcripts alone would report
+"Opus 5 100%" while Fable in the desktop app ate half the window next to it.
+That gap is measured rather than ignored: utilization and local cost would be
+proportional if Claude Code were the only consumer, so the smallest ratio
+observed between any two samples estimates the true rate, and whatever it
+fails to explain becomes a muted **Elsewhere** segment. It errs toward silence — if
+something else was running during every sample, the remainder is
+under-reported, never invented.
+
+The daemon only reads those files when the option is on. With it off (the
+default) nothing changes: no transcript reads, no `ms` field, and the plain
+single-color bar. Host support is macOS/Linux (`daemon/claude_usage_daemon.py`)
+for now — the Windows tray daemon and the Linux bash daemon don't send `ms`
+yet, and the firmware handles its absence as it always has.
+
 ## Physical buttons
 
 The board has three side buttons. Left and right send HID keys; the middle (PWR) button cycles splash animations and, held for 3 seconds, triggers pairing mode.
@@ -222,10 +263,11 @@ The device advertises a custom GATT service alongside the standard HID keyboard 
 JSON payload format (written to RX):
 
 ```json
-{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
+{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true,
+  "ms": [["o5", 64], ["s5", 28], ["~", 8]] }
 ```
 
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag, `ms` = optional per-model split, heaviest first, summing to 100 (`~` = used outside Claude Code; see below).
 
 ## Development
 

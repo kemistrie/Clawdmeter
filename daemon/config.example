@@ -30,3 +30,15 @@ chime = off
 #   12   = show the clock, forced 12-hour  (e.g. 6:28 PM)
 #   24   = show the clock, forced 24-hour  (e.g. 18:28)
 clock = off
+
+# Break the "Current" bar down by model, so you can see whether Opus, Fable or
+# Sonnet is what's eating your 5-hour window. The Anthropic API has no
+# per-model rate limit — one unified quota covers every model — so this is
+# reconstructed locally from Claude Code's own transcripts under
+# <config dir>/projects/, weighted by list price.
+# Usage from the desktop app or claude.ai hits the same quota but leaves no
+# local transcript; whatever the numbers can't account for shows as a muted
+# "Elsewhere" segment rather than being silently credited to Claude Code.
+#   off = plain single-color bar (default)
+#   on  = bar is split into per-model segments, dominant model named below it
+model_split = off
