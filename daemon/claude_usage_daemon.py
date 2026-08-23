@@ -24,6 +24,13 @@ import httpx
 from bleak import BleakClient
 from bleak.exc import BleakError
 
+try:                                    # imported as a package (tests)
+    from . import model_split as model_split_mod
+    from .unattributed import UnattributedTracker
+except ImportError:                     # run as a script (LaunchAgent/systemd)
+    import model_split as model_split_mod
+    from unattributed import UnattributedTracker
+
 DEVICE_NAME = "Clawdmeter"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
@@ -39,6 +46,8 @@ KEYCHAIN_SERVICE = "Claude Code-credentials"
 DEFAULT_CONFIG_DIR = Path.home() / ".claude"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
 CONFIG_FILE = Path.home() / ".config" / "claude-usage-monitor" / "config"
+SPLIT_STATE_FILE = (Path.home() / ".config" / "claude-usage-monitor"
+                    / "model-split-state.json")
 
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
@@ -356,6 +365,66 @@ def read_clock_setting() -> str:
     return "off"
 
 
+def read_model_split_setting() -> str:
+    """Read the `model_split` option from the config file. One of: off|on.
+
+    Defaults to "off": the split is reconstructed by reading Claude Code's
+    local transcripts, and that's a new file-access behaviour nobody should
+    get without asking for it.
+    """
+    try:
+        if CONFIG_FILE.exists():
+            for line in CONFIG_FILE.read_text().splitlines():
+                line = line.split("#", 1)[0].strip()
+                if "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                if key.strip().lower() == "model_split":
+                    val = val.strip().lower()
+                    if val in ("off", "on"):
+                        return val
+    except OSError:
+        pass
+    return "off"
+
+
+# Learns how much window one dollar of Claude Code work costs, so the share
+# that other apps consumed can be told apart from the share we can name.
+# Module-level: the estimate is worth keeping across polls and reconnects.
+_UNATTRIBUTED = UnattributedTracker(SPLIT_STATE_FILE)
+
+
+def add_model_split_field(payload: dict, config_dir: Path,
+                          reset_epoch: float) -> None:
+    """Add "ms":[[code,pct],...] when the config opts in and we found turns.
+
+    The named slices come from Claude Code's transcripts; a trailing "~" slice
+    covers whatever ate the window that Claude Code can't see (the desktop app,
+    claude.ai, the same plan on a second machine). Omitted entirely when off,
+    when the transcripts hold nothing inside the window, or on any read error —
+    the firmware then draws the plain bar.
+    """
+    if read_model_split_setting() != "on":
+        return
+    try:
+        weights = model_split_mod.window_weights(config_dir, reset_epoch)
+    except OSError as e:
+        log(f"Model split unavailable: {e}")
+        return
+    if not weights:
+        return
+
+    utilization = float(payload.get("s", 0) or 0)
+    hidden = _UNATTRIBUTED.update(reset_epoch, utilization,
+                                  sum(weights.values()))
+    if hidden > 0:
+        log(f"Model split: {hidden:.0f}% of the window used outside Claude Code")
+    slices = model_split_mod.to_slices(
+        model_split_mod.add_unattributed(weights, utilization, hidden))
+    if slices:
+        payload["ms"] = slices
+
+
 def add_chime_field(payload: dict) -> None:
     """Add "c":1 to the payload when the config opts in, so the firmware may
     sound the session-reset chime. Omitted entirely when chime is off."""
@@ -401,7 +470,10 @@ def add_clock_fields(payload: dict) -> None:
     payload["tf"] = tf
 
 
-async def poll_api(token: str) -> dict | None:
+async def poll_api(token: str,
+                   config_dir: Path = DEFAULT_CONFIG_DIR) -> dict | None:
+    # config_dir is only used to locate that plan's Claude Code transcripts
+    # for the model split; the API call itself is driven purely by the token.
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
     try:
@@ -439,15 +511,22 @@ async def poll_api(token: str) -> dict | None:
     # Pro/Max accounts expose 5h/7d windows; Enterprise/overage use a single
     # spending-limit model reported via overage-utilization.
     if resp.headers.get("anthropic-ratelimit-unified-5h-utilization"):
+        session_reset = hdr("anthropic-ratelimit-unified-5h-reset")
         payload = {
             "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-            "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
+            "sr": reset_minutes(session_reset),
             "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
             "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
             "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
             "acct": "pro",
             "ok": True,
         }
+        # Which model is eating this window. Pro/Max only: the split is scoped
+        # to the 5h window, and Enterprise has no such window to scope it to.
+        try:
+            add_model_split_field(payload, config_dir, float(session_reset))
+        except ValueError:
+            pass
     else:
         reset_ts = hdr("anthropic-ratelimit-unified-overage-reset")
         payload = {
@@ -560,7 +639,7 @@ async def poll_active(selector: PlanSelector = _SELECTOR) -> tuple[dict | None, 
             log(f"No token in {d}; skipping")
             continue
         try:
-            payload = await poll_api(token)
+            payload = await poll_api(token, d)
         except TokenExpired:
             log(f"Token in {d} expired/invalid; skipping")
             continue

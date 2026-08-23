@@ -88,7 +88,7 @@ firmware/src/
   ui.{h,cpp}                — 3-screen UI (splash, usage, bluetooth). compute_layout() picks fonts/positions from board_caps() (responsive — current breakpoint: H >= 460 → large, else compact)
   splash.{h,cpp}            — 20×20 pixel-art engine. CELL = min(W,H)/20, centered.
   ble.{h,cpp}               — NimBLE peripheral: custom data service + HID keyboard
-  data.h                    — UsageData struct
+  data.h                    — UsageData struct + ModelSlice (per-model 5h split)
   icons.h                   — icon arrays. Battery (5×) are RGB565A8 with alpha; rest are raw RGB565.
   logo.h                    — 80×80 RGB565 logo
   font_*.c                  — pre-compiled LVGL 9 bitmap fonts (Tiempos 56/34, Styrene 48/28/24/20/16/14/12, Mono 32/18)
@@ -218,12 +218,76 @@ for `/images/` paths (`research/clawd-official/CLAUDE.md` documents the full
 methodology, including the Lottie sources and the assets-proxy).
 
 
+## Per-model split of the 5h window
+
+**There is no per-model rate-limit header.** Verified live against a Pro/Max
+account: `POST /v1/messages` returns the identical `anthropic-ratelimit-unified-*`
+set (5h / 7d / overage / representative-claim) whether the request names
+Haiku, Opus 5, Opus 4.7 or Fable 5. One quota covers every model — don't go
+looking for `…-opus-utilization`, it doesn't exist. (Also: with an OAuth
+subscription token, a request *without* a Claude Code system prompt gets a
+bare 429 on non-Haiku models — that's an authorization guard, not a limit.)
+
+So `daemon/model_split.py` rebuilds the split from Claude Code's own
+transcripts (`<config dir>/projects/**/*.jsonl`): each assistant record
+carries `message.model` + `message.usage`, summed over the current 5h window
+(`5h-reset` minus 5h) and weighted by list price. Two things bite:
+
+1. **Claude Code writes one record per content block**, all repeating the same
+   aggregate `usage` — dedup on `message.id` or turns get counted 2-3x.
+2. Files whose mtime predates the window are skipped unread, which is what
+   keeps the 60s poll at ~4ms.
+
+**Cache reads do not count toward the quota** (`CACHE_READ_MULTIPLIER = 0.0`).
+They bill at 0.1x, but weighting them that way made long cache-heavy agent
+turns look far more expensive than the window treated them. Measured on a live
+window: sweeping the weight 0 → 0.10 drifted the observed %-per-dollar by
+1.38x → 1.63x across a stretch where cache-read intensity rose sharply, and
+only 0 held it flat. Cache writes stay at list price (1.25x). If a future
+sweep says otherwise, those two constants are the knobs.
+
+**The transcripts only cover the CLI.** The desktop app and claude.ai draw on
+the same quota and write nothing locally (checked: the app's only usage file,
+`~/Library/Application Support/Claude/plan-usage-history.json`, stores the
+same unified 5h/7d percentages, no model breakdown). `daemon/unattributed.py`
+measures that gap instead of ignoring it: `u = k*l` would hold if Claude Code
+were the only consumer, so `k̂` estimates the rate and `u - k̂*l` is the
+remainder, shipped as the `"~"` slice.
+
+`k̂` is the **minimum ratio between pairs of samples**, not of the running
+totals — this was a real bug first time round. A window's totals carry
+whatever happened before the daemon started watching it, so a cumulative
+`u / l` stays anchored to that history and creeps toward the true rate far
+too slowly, explaining away a genuine gap for the rest of the window.
+Differences cancel the history. Pairs need `MIN_DELTA_UTIL = 3` points apart
+(utilization only moves in whole percent — a 1-point step is 100%
+quantization error). Failure direction is deliberate: hidden usage during
+*every* pair keeps `k̂` high and under-reports; it never invents usage.
+State (`k`, the window id, and the sample ring) lives in
+`~/.config/claude-usage-monitor/model-split-state.json`; delete it to relearn.
+
+Wire: `"ms": [["o5",64],["s5",28],["~",8]]`, heaviest first, summing to 100,
+max 4 slices (surplus models fold into `"?"`; `"~"` has a reserved slot and is
+never folded — "another model" and "another app" are different answers).
+Opt-in via `model_split = on` in the daemon config; absent otherwise, and the
+firmware then draws the plain bar it always did.
+
+Firmware: `ui.cpp` overlays `seg_clip` (a rounded clipping frame sized to the
+filled portion) + one flat rect per model on the session bar, and moves the
+utilization warning color onto the big percentage since the bar no longer
+carries it. The legend names one model at a time and rotates every 2.5s —
+there is no room for more, and `render_model_legend()` measures the real
+rendered label width against the space the "Resets in …" line leaves, falling
+back `Opus 5 64%` → `O5 64%` → `O5` → hidden. That's why the 368x448 panel
+shows the short form and 480x480 / 240x240 show the full one.
+
 ## User profile / preferences
 
 See `~/.claude/projects/.../memory/` files for persistent context (user is an embedded-beginner senior dev, brand-conscious, prefers iterative UI refinement, dislikes me authoring my own art when third-party assets are intended). Always read those memory files at session start.
 
 ## Recent session highlights
 
+- **Per-model split of the 5h window (2026-08-23).** The Current bar now breaks down by model. Established first that the API cannot answer this (no per-model header exists), then rebuilt it host-side from Claude Code transcripts, plus an `"~"` Elsewhere slice for the desktop-app/web usage the transcripts can't see. See the section above for the gotchas and the legend's fit-measuring fallback. Also fixed a pre-existing bug found while testing: the weekly pill kept the enterprise "Period" label after a Pro payload (only reachable via a mixed-plan `config_dirs`).
 - **AMOLED-1.8 chime verified on hardware + EXIO2 touch-kill fix (2026-07-13).** The 1.8's `amp_enable` hook drove both GPIO 46 and XCA9554 EXIO2 ("the unused one is harmless") — but pulling EXIO2 low takes the FT3168 off the I2C bus (chip stops ACKing; IDF reports it as `ESP_ERR_INVALID_STATE`, which reads like a driver wedge and cost a long I2S red-herring chase). Amp enable is GPIO 46 only; EXIO2 must stay HIGH. Chime, touch, buttons, and BLE bond persistence all verified on a real 1.8.
 - **Device-abstraction refactor (2026-05-18).** All board-conditional code moved out of shared files into `boards/<name>/` and behind a HAL in `hal/`. ~30 `#ifdef BOARD_*` blocks went to zero. UI is responsive via `compute_layout()` driven by `board_caps()`. New ports add a folder + a PlatformIO env — no shared file edits.
 - Added second board port: Waveshare AMOLED-1.8 (368×448 portrait, SH8601, FT3168, XCA9554 IO expander).
